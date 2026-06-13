@@ -1,6 +1,6 @@
 [package]
 name = "andro"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "Run Android apps from the macOS command line on a disposable, self-contained Android emulator (Apple Silicon)"
 license = "MIT"
