@@ -180,6 +180,7 @@ pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
     }
     if !is_running(sdk) {
         clear_stale_locks(sdk, cfg);
+        enable_hw_keyboard(sdk, cfg);
         eprintln!("🚀 booting emulator ({})…", cfg.profile.avd_name());
         let log = sdk.home().join("emulator.log");
         let mut c = sdk.command(&sdk.emulator_bin());
@@ -220,6 +221,24 @@ fn boot_args(cfg: &Config) -> Vec<String> {
         args.push(mem.to_string());
     }
     args
+}
+
+/// Make the AVD type from the host (Mac) keyboard. avdmanager's device profiles
+/// leave `hw.keyboard=no` in the generated `config.ini`, which drops physical
+/// key events; patch it to `yes` in place before booting. Idempotent and applied
+/// on every cold boot so AVDs created by an older andro heal automatically. The
+/// on-screen keyboard is unaffected — the images keep `show_ime_with_hard_keyboard=1`.
+/// Best-effort: a missing/unwritable config.ini just leaves the AVD as-is.
+fn enable_hw_keyboard(sdk: &Sdk, cfg: &Config) {
+    let config = sdk
+        .avd_home()
+        .join(format!("{}.avd", cfg.profile.avd_name()))
+        .join("config.ini");
+    if let Ok(text) = fs::read_to_string(&config)
+        && let Some(patched) = emulator::with_hw_keyboard_enabled(&text)
+    {
+        let _ = fs::write(&config, patched);
+    }
 }
 
 /// Remove stale AVD lock files left by a crashed emulator. Only safe because the
