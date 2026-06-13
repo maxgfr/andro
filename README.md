@@ -1,6 +1,6 @@
 # andro
 
-Run Android apps — phone **or smart TV** — from your macOS command line, on a
+Run Android apps on phone **or smart TV** — from your macOS command line, on a
 fast, **disposable** Android emulator. No Android Studio, nothing installed
 system-wide — andro downloads a self-contained JDK + Android SDK into `~/.andro`,
 and `andro clean` wipes everything.
