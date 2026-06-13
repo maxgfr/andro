@@ -16,5 +16,15 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 anyhow = "1"
 dirs = "5"
+
+# Optimize the shipped binary: it's I/O-bound (shells out to curl/adb/emulator),
+# so trade compile time for a smaller, stripped artifact.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

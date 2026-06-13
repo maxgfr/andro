@@ -48,8 +48,8 @@ pub fn ensure_jdk(sdk: &Sdk, arch: &str) -> Result<()> {
     if sdk.java().exists() {
         return Ok(());
     }
-    fs::create_dir_all(sdk.home())?;
-    let tar = sdk.home().join("jdk.tar.gz");
+    fs::create_dir_all(sdk.tmp_dir())?;
+    let tar = sdk.tmp_dir().join("jdk.tar.gz");
     eprintln!("⬇️  downloading JDK 17…");
     download(&sdk::jdk_url(arch), &tar)?;
     let jdk_dir = sdk.home().join("jdk");
@@ -72,7 +72,8 @@ pub fn ensure_sdk(sdk: &Sdk, image: &str) -> Result<()> {
     }
     if !sdk.sdkmanager().exists() {
         eprintln!("⬇️  downloading Android command-line tools…");
-        let zip = sdk.home().join("cmdline-tools.zip");
+        fs::create_dir_all(sdk.tmp_dir())?;
+        let zip = sdk.tmp_dir().join("cmdline-tools.zip");
         let url = std::env::var("ANDRO_CMDLINE_TOOLS_URL")
             .unwrap_or_else(|_| CMDLINE_TOOLS_URL_DEFAULT.to_string());
         download(&url, &zip)?;
@@ -178,18 +179,11 @@ pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
         return Ok(());
     }
     if !is_running(sdk) {
+        clear_stale_locks(sdk, cfg);
         eprintln!("🚀 booting emulator ({})…", cfg.profile.avd_name());
         let log = sdk.home().join("emulator.log");
         let mut c = sdk.command(&sdk.emulator_bin());
-        c.args([
-            "-avd",
-            cfg.profile.avd_name(),
-            "-no-snapshot",
-            "-no-boot-anim",
-            "-gpu",
-            "auto",
-        ])
-        .stdin(Stdio::null());
+        c.args(boot_args(cfg)).stdin(Stdio::null());
         if let Ok(f) = fs::File::create(&log)
             && let Ok(f2) = f.try_clone()
         {
@@ -200,16 +194,88 @@ pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
     wait_for_boot(sdk)
 }
 
+/// Emulator launch flags. Cold boot by default (`-no-snapshot`) to keep a clean
+/// device each run; `--snapshot` drops it so quickboot persists for fast reboots.
+fn boot_args(cfg: &Config) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-avd".into(),
+        cfg.profile.avd_name().into(),
+        "-no-boot-anim".into(),
+        "-no-audio".into(),
+        "-gpu".into(),
+        "auto".into(),
+    ];
+    if !cfg.boot.snapshot {
+        args.push("-no-snapshot".into());
+    }
+    if cfg.boot.no_window {
+        args.push("-no-window".into());
+    }
+    if let Some(cores) = cfg.boot.cores {
+        args.push("-cores".into());
+        args.push(cores.to_string());
+    }
+    if let Some(mem) = cfg.boot.memory {
+        args.push("-memory".into());
+        args.push(mem.to_string());
+    }
+    args
+}
+
+/// Remove stale AVD lock files left by a crashed emulator. Only safe because the
+/// caller already checked the emulator is NOT running; clears the spurious
+/// "AVD is already in use" error so the next boot just works.
+fn clear_stale_locks(sdk: &Sdk, cfg: &Config) {
+    let avd = sdk
+        .avd_home()
+        .join(format!("{}.avd", cfg.profile.avd_name()));
+    for lock in ["multiinstance.lock", "hardware-qemu.ini.lock"] {
+        let _ = fs::remove_file(avd.join(lock));
+    }
+}
+
 fn wait_for_boot(sdk: &Sdk) -> Result<()> {
+    wait_ready(sdk, BOOT_TIMEOUT, false)
+}
+
+/// Block until the emulator is ready: device attached → `sys.boot_completed` →
+/// (unless `boot_only`) PackageManager answers. Errors on timeout. Does NOT
+/// boot — waits on whatever is currently running. Exposed for `andro wait`.
+pub fn wait_ready(sdk: &Sdk, timeout: Duration, boot_only: bool) -> Result<()> {
     let start = Instant::now();
     let _ = sdk.adb_try(&["wait-for-device"]);
     loop {
         if is_booted(sdk) {
             eprintln!("✅ emulator booted");
+            if !boot_only {
+                wait_for_package_manager(sdk);
+            }
             return Ok(());
         }
-        if start.elapsed() > BOOT_TIMEOUT {
-            bail!("emulator did not boot within {}s", BOOT_TIMEOUT.as_secs());
+        if start.elapsed() > timeout {
+            bail!(
+                "emulator did not become ready within {}s",
+                timeout.as_secs()
+            );
+        }
+        sleep(POLL);
+    }
+}
+
+/// `sys.boot_completed=1` fires before PackageManager is fully up, so installing
+/// right after boot can flake. Poll until `cmd package` answers. Bounded and
+/// best-effort: on timeout we fall through rather than regress a good boot.
+fn wait_for_package_manager(sdk: &Sdk) {
+    const PM_TIMEOUT: Duration = Duration::from_secs(60);
+    let start = Instant::now();
+    loop {
+        if let Some(out) = sdk.adb_try(&["shell", "cmd", "package", "list", "packages"])
+            && emulator::package_manager_ready(&out)
+        {
+            return;
+        }
+        if start.elapsed() > PM_TIMEOUT {
+            return;
         }
         sleep(POLL);
     }

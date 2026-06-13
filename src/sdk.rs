@@ -10,6 +10,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+/// Dedicated adb server port so andro runs its OWN isolated adb server. This is
+/// load-bearing for containment: the adb key is written by the server from its
+/// `$HOME` at start-server time, and if a foreign server already owns the global
+/// 5037 (e.g. Android Studio) our HOME override is silently ignored. A private
+/// port guarantees andro spawns its own server under `~/.andro/home`.
+pub const ADB_SERVER_PORT: u16 = 5577;
+
 /// Form factor we emulate. Drives the image tag, device, AVD name and the
 /// intent category used to launch an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +77,13 @@ pub fn abi_for_arch(arch: &str) -> &'static str {
 }
 
 /// Build a system-image package string, e.g. `system-images;android-36;android-tv;arm64-v8a`.
-pub fn image_package(api: u32, abi: &str, profile: Profile) -> String {
-    format!("system-images;android-{api};{};{abi}", profile.image_tag())
+/// With `playstore`, a phone uses the `google_apis_playstore` image (real Play Store).
+pub fn image_package(api: u32, abi: &str, profile: Profile, playstore: bool) -> String {
+    let tag = match (profile, playstore) {
+        (Profile::Phone, true) => "google_apis_playstore",
+        _ => profile.image_tag(),
+    };
+    format!("system-images;android-{api};{tag};{abi}")
 }
 
 /// Adoptium Temurin 17 download URL for a Rust target arch (macOS).
@@ -99,6 +111,20 @@ impl Sdk {
     pub fn avd_home(&self) -> PathBuf {
         self.home.join("avd")
     }
+    /// Synthetic `$HOME` for the bundled tools so adb's `adbkey` and the
+    /// emulator's `$HOME/.android` land under `~/.andro` instead of `~/.android`.
+    pub fn home_dir(&self) -> PathBuf {
+        self.home.join("home")
+    }
+    /// The contained `.android` dir (== `$HOME/.android` under [`home_dir`]).
+    pub fn android_home(&self) -> PathBuf {
+        self.home_dir().join(".android")
+    }
+    /// Single consolidated scratch dir for every transient file (downloads,
+    /// bundle extraction, tool temp). `autoclean` wipes this wholesale.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.home.join("tmp")
+    }
     pub fn java_home(&self) -> PathBuf {
         self.home.join("jdk/Contents/Home")
     }
@@ -119,7 +145,16 @@ impl Sdk {
     }
 
     /// A `Command` for `program` with the SDK environment applied.
+    ///
+    /// All state is forced under `~/.andro`: `HOME` is overridden (the only var
+    /// the bundled adb honours for its key dir), the emulator's `.android` home
+    /// is redirected, a dedicated adb port isolates our server, and temp dirs are
+    /// contained. The dirs are created here so the first adb/emulator call can't
+    /// fail trying to `mkdir` a missing `.android` parent.
     pub fn command(&self, program: &Path) -> Command {
+        let _ = std::fs::create_dir_all(self.android_home());
+        let _ = std::fs::create_dir_all(self.tmp_dir());
+        let _ = std::fs::create_dir_all(self.avd_home());
         let mut c = Command::new(program);
         let path = format!(
             "{}:{}:{}",
@@ -131,6 +166,15 @@ impl Sdk {
             .env("ANDROID_SDK_ROOT", self.sdk_root())
             .env("ANDROID_HOME", self.sdk_root())
             .env("ANDROID_AVD_HOME", self.avd_home())
+            // Containment (see ADB_SERVER_PORT): keep every tool's footprint inside
+            // ~/.andro so `clean` truly leaves nothing behind.
+            .env("HOME", self.home_dir())
+            .env("ANDROID_EMULATOR_HOME", self.android_home())
+            .env("ANDROID_PREFS_ROOT", self.home_dir())
+            .env("ANDROID_SDK_HOME", self.home_dir())
+            .env("ANDROID_ADB_SERVER_PORT", ADB_SERVER_PORT.to_string())
+            .env("TMPDIR", self.tmp_dir())
+            .env("ANDROID_TMP", self.tmp_dir())
             .env("PATH", path);
         c
     }
@@ -172,6 +216,24 @@ impl Sdk {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
+
+    /// Run adb and return raw stdout bytes — for binary output like `screencap`
+    /// where lossy UTF-8 conversion would corrupt the payload.
+    pub fn adb_bytes(&self, args: &[&str]) -> Result<Vec<u8>> {
+        let out = self
+            .command(&self.adb())
+            .args(args)
+            .output()
+            .context("failed to run adb")?;
+        if !out.status.success() {
+            bail!(
+                "adb {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(out.stdout)
+    }
 }
 
 #[cfg(test)]
@@ -188,12 +250,20 @@ mod tests {
     #[test]
     fn image_package_phone_and_tv() {
         assert_eq!(
-            image_package(36, "arm64-v8a", Profile::Phone),
+            image_package(36, "arm64-v8a", Profile::Phone, false),
             "system-images;android-36;google_apis;arm64-v8a"
         );
         assert_eq!(
-            image_package(36, "arm64-v8a", Profile::Tv),
+            image_package(36, "arm64-v8a", Profile::Tv, false),
             "system-images;android-36;android-tv;arm64-v8a"
+        );
+    }
+
+    #[test]
+    fn image_package_phone_playstore_uses_playstore_image() {
+        assert_eq!(
+            image_package(36, "arm64-v8a", Profile::Phone, true),
+            "system-images;android-36;google_apis_playstore;arm64-v8a"
         );
     }
 
