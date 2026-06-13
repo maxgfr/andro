@@ -117,6 +117,54 @@ pub fn parse_image_sysdir(config_ini: &str) -> Option<String> {
         .map(|v| v.trim().trim_end_matches('/').to_string())
 }
 
+/// Ensure an AVD `config.ini` enables the emulated hardware keyboard so the host
+/// (Mac) keyboard types into the guest. avdmanager's device profiles default
+/// `hw.keyboard=no`, which silently drops host key events — you tap a field, the
+/// on-screen keyboard shows, but typing on the Mac does nothing. Flipping it to
+/// `yes` forwards the physical keyboard; the soft IME still appears because the
+/// system images default `show_ime_with_hard_keyboard=1`.
+///
+/// Pure string transform: returns the rewritten file when a change is needed, or
+/// `None` if it already reads `hw.keyboard=yes` (so the caller can skip writing).
+/// Only the exact `hw.keyboard=` key is touched — `hw.keyboard.charmap`/`.lid`
+/// are left alone.
+pub fn with_hw_keyboard_enabled(config_ini: &str) -> Option<String> {
+    fn is_hw_keyboard(line: &str) -> bool {
+        line.trim_start()
+            .strip_prefix("hw.keyboard")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    }
+    let mut found = false;
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in config_ini.lines() {
+        if is_hw_keyboard(line) {
+            found = true;
+            let value = line.split_once('=').map_or("", |(_, v)| v.trim());
+            if value == "yes" {
+                out.push(line.to_string());
+            } else {
+                out.push("hw.keyboard=yes".to_string());
+                changed = true;
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !found {
+        out.push("hw.keyboard=yes".to_string());
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    let mut result = out.join("\n");
+    if config_ini.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
 /// System images that are installed but referenced by no live AVD — i.e. safe
 /// to prune. Both lists are relative image paths (`system-images/<api>/<tag>/<abi>`).
 pub fn unreferenced_images(installed: &[String], referenced: &[String]) -> Vec<String> {
@@ -176,6 +224,45 @@ mod tests {
     fn parse_image_sysdir_none_when_absent() {
         assert_eq!(parse_image_sysdir("hw.ramSize=2048\n"), None);
         assert_eq!(parse_image_sysdir(""), None);
+    }
+
+    #[test]
+    fn hw_keyboard_flips_no_to_yes_and_leaves_siblings() {
+        let ini = "hw.dPad=no\n\
+                   hw.keyboard=no\n\
+                   hw.keyboard.charmap=qwerty2\n\
+                   hw.keyboard.lid=yes\n\
+                   hw.mainKeys=no\n";
+        let out = with_hw_keyboard_enabled(ini).expect("should rewrite");
+        assert!(out.contains("hw.keyboard=yes"));
+        // siblings untouched
+        assert!(out.contains("hw.keyboard.charmap=qwerty2"));
+        assert!(out.contains("hw.keyboard.lid=yes"));
+        // the old value is gone and the file still ends in a newline
+        assert!(!out.contains("hw.keyboard=no"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn hw_keyboard_noop_when_already_yes() {
+        let ini = "hw.keyboard=yes\nhw.mainKeys=no\n";
+        assert_eq!(with_hw_keyboard_enabled(ini), None);
+    }
+
+    #[test]
+    fn hw_keyboard_appended_when_absent() {
+        let ini = "hw.dPad=no\nhw.mainKeys=no\n";
+        let out = with_hw_keyboard_enabled(ini).expect("should append");
+        assert!(out.contains("hw.keyboard=yes"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn hw_keyboard_noop_does_not_match_charmap_only() {
+        // a config that has the sibling keys but no bare hw.keyboard= must append.
+        let ini = "hw.keyboard.charmap=qwerty2\nhw.keyboard.lid=yes\n";
+        let out = with_hw_keyboard_enabled(ini).expect("should append a bare key");
+        assert!(out.lines().any(|l| l == "hw.keyboard=yes"));
     }
 
     #[test]
