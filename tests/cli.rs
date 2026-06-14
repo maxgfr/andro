@@ -186,3 +186,17 @@ fn e2e_run_apk() {
         .expect("run andro");
     assert!(status.success());
 }
+
+/// Full `.aab` flow: also downloads bundletool, reads the device spec, builds and
+/// installs the matched splits.
+/// `ANDRO_E2E_AAB=/path/app.aab cargo test -- --ignored e2e`
+#[test]
+#[ignore = "needs macOS and ~2GB of SDK downloads + bundletool"]
+fn e2e_run_aab() {
+    let aab = std::env::var("ANDRO_E2E_AAB").expect("set ANDRO_E2E_AAB");
+    let status = Command::new(BIN)
+        .args(["run", &aab, "--no-launch"])
+        .status()
+        .expect("run andro");
+    assert!(status.success());
+}

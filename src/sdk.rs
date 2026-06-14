@@ -92,6 +92,21 @@ pub fn jdk_url(arch: &str) -> String {
     format!("https://api.adoptium.net/v3/binary/latest/17/ga/mac/{a}/jdk/hotspot/normal/eclipse")
 }
 
+/// Pinned bundletool release. The jar is platform-agnostic (pure Java), so unlike
+/// [`jdk_url`] this takes no arch.
+const BUNDLETOOL_VERSION: &str = "1.18.1";
+
+/// Download URL for the bundletool "all" jar. Overridable via `ANDRO_BUNDLETOOL_URL`
+/// (mirrors `ANDRO_CMDLINE_TOOLS_URL`); otherwise a pinned GitHub release.
+pub fn bundletool_url() -> String {
+    std::env::var("ANDRO_BUNDLETOOL_URL").unwrap_or_else(|_| {
+        format!(
+            "https://github.com/google/bundletool/releases/download/{v}/bundletool-all-{v}.jar",
+            v = BUNDLETOOL_VERSION
+        )
+    })
+}
+
 /// Holds the `~/.andro` layout and runs SDK tools with the right environment.
 pub struct Sdk {
     home: PathBuf,
@@ -130,6 +145,10 @@ impl Sdk {
     }
     pub fn java(&self) -> PathBuf {
         self.java_home().join("bin/java")
+    }
+    /// The on-demand bundletool jar (downloaded only when an `.aab` is installed).
+    pub fn bundletool_jar(&self) -> PathBuf {
+        self.home.join("bundletool.jar")
     }
     pub fn adb(&self) -> PathBuf {
         self.sdk_root().join("platform-tools/adb")
@@ -234,6 +253,28 @@ impl Sdk {
         }
         Ok(out.stdout)
     }
+
+    /// Run the bundled bundletool jar (`java -jar bundletool.jar <args>`), returning
+    /// trimmed stdout; bails on non-zero with stderr. Goes through [`command`] so it
+    /// inherits `JAVA_HOME` and `ANDROID_ADB_SERVER_PORT` — the latter is what lets
+    /// `--connected-device` reach andro's private adb server.
+    pub fn bundletool(&self, args: &[&str]) -> Result<String> {
+        let out = self
+            .command(&self.java())
+            .arg("-jar")
+            .arg(self.bundletool_jar())
+            .args(args)
+            .output()
+            .context("failed to run bundletool")?;
+        if !out.status.success() {
+            bail!(
+                "bundletool {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
 }
 
 #[cfg(test)]
@@ -272,6 +313,15 @@ mod tests {
         assert!(jdk_url("aarch64").contains("/aarch64/"));
         assert!(jdk_url("x86_64").contains("/x64/"));
         assert!(jdk_url("aarch64").starts_with("https://api.adoptium.net/"));
+    }
+
+    #[test]
+    fn bundletool_url_points_at_a_release_jar() {
+        // Default shape (no ANDRO_BUNDLETOOL_URL override in the test env).
+        let url = bundletool_url();
+        assert!(url.starts_with("https://github.com/google/bundletool"));
+        assert!(url.contains("bundletool-all"));
+        assert!(url.ends_with(".jar"));
     }
 
     #[test]

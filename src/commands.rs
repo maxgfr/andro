@@ -31,7 +31,8 @@ pub fn up(cfg: &Config) -> Result<()> {
 }
 
 /// `andro run <target>` — provision/boot, install, launch. `target` is a single
-/// `.apk`, a directory of split apks, or a `.xapk`/`.apks`/`.apkm` bundle.
+/// `.apk`, a directory of split apks, a `.xapk`/`.apks`/`.apkm` bundle, or an `.aab`
+/// (converted to device-matched splits with bundletool).
 pub fn run(
     cfg: &Config,
     target: &Path,
@@ -70,25 +71,84 @@ pub fn run(
     Ok(())
 }
 
-/// Install whatever `target` is — single apk, split-apk directory, or bundle zip.
+/// Install whatever `target` is — single apk, split-apk directory, bundle zip, or
+/// `.aab` (converted to device-matched splits with bundletool first).
 fn install_target(s: &Sdk, target: &Path, downgrade: bool) -> Result<()> {
     match emulator::classify_install_input(target, target.is_dir()) {
         InstallInput::Single => install_apks(s, &[target.to_path_buf()], downgrade),
         InstallInput::MultiApk => install_apks(s, &collect_apks(target)?, downgrade),
-        InstallInput::Bundle => {
-            // Extract into the consolidated tmp dir (pid-scoped so concurrent runs
-            // don't collide); `autoclean`/`clean` sweep whatever's left.
-            let tmp = s.tmp_dir().join(format!("extract-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&tmp);
-            fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-            let res = (|| {
-                extract_zip(target, &tmp)?;
-                install_apks(s, &collect_apks(&tmp)?, downgrade)
-            })();
-            let _ = fs::remove_dir_all(&tmp);
-            res
+        // Unzip the bundle into scratch space, then install whatever apks it holds.
+        InstallInput::Bundle => install_into_tmp(s, downgrade, |tmp| extract_zip(target, tmp)),
+        // adb can't install an .aab — bundletool turns it into the splits matching
+        // the booted emulator (talking to it over andro's private adb port), which
+        // we then install-multiple with andro's usual flags.
+        InstallInput::Aab => {
+            provision::ensure_bundletool(s)?;
+            install_into_tmp(s, downgrade, |tmp| build_aab_splits(s, target, tmp))
         }
     }
+}
+
+/// Populate a pid-scoped scratch dir under `~/.andro/tmp` with loose `.apk`s via
+/// `produce`, install them, then sweep the dir. Pid-scoping keeps concurrent runs
+/// from colliding; `autoclean`/`clean` reclaim anything left behind on a crash.
+fn install_into_tmp(
+    s: &Sdk,
+    downgrade: bool,
+    produce: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let tmp = s.tmp_dir().join(format!("extract-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let res = (|| {
+        produce(&tmp)?;
+        install_apks(s, &collect_apks(&tmp)?, downgrade)
+    })();
+    let _ = fs::remove_dir_all(&tmp);
+    res
+}
+
+/// Convert an `.aab` into the splits matching the booted emulator, leaving loose
+/// `.apk`s in `dest`. Three bundletool steps, all reusing one device spec so build
+/// and extract agree: read the emulator's spec (abi/density/sdk/locale), build only
+/// the APKs that device needs, then `extract-apks` (which reads the set's `toc.pb`)
+/// emits exactly the matched splits — no mutually-exclusive standalones. The spec and
+/// intermediate archive live outside `dest` so `collect_apks` only sees the apks.
+fn build_aab_splits(s: &Sdk, aab: &Path, dest: &Path) -> Result<()> {
+    let pid = std::process::id();
+    let spec = s.tmp_dir().join(format!("aab-spec-{pid}.json"));
+    let apks = s.tmp_dir().join(format!("aab-{pid}.apks"));
+    let _ = fs::remove_file(&spec);
+    let _ = fs::remove_file(&apks);
+    let res = (|| {
+        s.bundletool(&[
+            "get-device-spec",
+            "--connected-device",
+            &format!("--adb={}", s.adb().display()),
+            &format!("--output={}", spec.display()),
+            "--overwrite",
+        ])
+        .context("bundletool get-device-spec failed (is the emulator booted?)")?;
+        s.bundletool(&[
+            "build-apks",
+            &format!("--bundle={}", aab.display()),
+            &format!("--output={}", apks.display()),
+            &format!("--device-spec={}", spec.display()),
+            "--overwrite",
+        ])
+        .context("bundletool build-apks failed")?;
+        s.bundletool(&[
+            "extract-apks",
+            &format!("--apks={}", apks.display()),
+            &format!("--device-spec={}", spec.display()),
+            &format!("--output-dir={}", dest.display()),
+        ])
+        .context("bundletool extract-apks failed")?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&spec);
+    let _ = fs::remove_file(&apks);
+    res
 }
 
 /// Install one or many apks via `adb install` / `install-multiple`, granting
@@ -728,7 +788,15 @@ fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
 /// List home-root entries that aren't andro-managed (e.g. stray screenshots) so
 /// the user sees they were protected, never deleted.
 fn list_skipped_user_files(s: &Sdk) {
-    const ANDRO: [&str; 6] = ["sdk", "avd", "jdk", "home", "tmp", "emulator.log"];
+    const ANDRO: [&str; 7] = [
+        "sdk",
+        "avd",
+        "jdk",
+        "home",
+        "tmp",
+        "emulator.log",
+        "bundletool.jar",
+    ];
     let mut skipped = Vec::new();
     if let Ok(rd) = fs::read_dir(s.home()) {
         for e in rd.flatten() {
@@ -841,6 +909,14 @@ pub fn doctor(cfg: &Config) -> Result<()> {
             "installed"
         } else {
             "missing (downloaded on first run)"
+        }
+    );
+    println!(
+        "bundletool: {}",
+        if s.bundletool_jar().exists() {
+            "installed"
+        } else {
+            "missing (downloaded on first .aab)"
         }
     );
     println!(

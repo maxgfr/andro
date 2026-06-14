@@ -53,9 +53,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Provision (first run), boot, install and launch. Target is a .apk, a
-    /// directory of split apks, or a .xapk/.apks/.apkm bundle.
+    /// directory of split apks, a .xapk/.apks/.apkm bundle, or an .aab.
     Run {
-        /// Path to a .apk, a split-apk directory, or a bundle archive
+        /// Path to a .apk, a split-apk directory, a bundle archive, or an .aab
         apk: PathBuf,
         /// Install without launching
         #[arg(long)]
@@ -69,7 +69,7 @@ enum Command {
     },
     /// Install an app without launching it (same inputs as `run`)
     Install {
-        /// Path to a .apk, a split-apk directory, or a bundle archive
+        /// Path to a .apk, a split-apk directory, a bundle archive, or an .aab
         apk: PathBuf,
         /// Allow installing an older version over a newer one (adb -d)
         #[arg(long)]

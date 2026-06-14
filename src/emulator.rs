@@ -15,6 +15,9 @@ pub enum InstallInput {
     MultiApk,
     /// A `.xapk`/`.apks`/`.apkm` zip of split apks → unzip then install-multiple.
     Bundle,
+    /// An `.aab` Android App Bundle → bundletool builds device-matched splits,
+    /// then install-multiple.
+    Aab,
 }
 
 /// Classify an install target. `is_dir` is the filesystem fact about `path`,
@@ -30,6 +33,7 @@ pub fn classify_install_input(path: &Path, is_dir: bool) -> InstallInput {
         .to_ascii_lowercase();
     match ext.as_str() {
         "xapk" | "apks" | "apkm" => InstallInput::Bundle,
+        "aab" => InstallInput::Aab,
         _ => InstallInput::Single,
     }
 }
@@ -344,6 +348,17 @@ mod tests {
                 classify_install_input(Path::new(f), false),
                 InstallInput::Bundle,
                 "{f} should be a bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_aab_by_extension() {
+        for f in ["app.aab", "APP.AAB", "/x/My.Aab"] {
+            assert_eq!(
+                classify_install_input(Path::new(f), false),
+                InstallInput::Aab,
+                "{f} should be an aab"
             );
         }
     }

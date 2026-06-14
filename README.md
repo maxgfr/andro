@@ -8,6 +8,7 @@ and `andro clean` wipes everything.
 ```sh
 andro run app.apk          # boot a phone emulator, install, launch
 andro run app.xapk         # split-APK bundles (.xapk/.apks/.apkm) and split dirs too
+andro run app.aab          # Android App Bundles too (built with bundletool on the fly)
 andro --tv run tvapp.apk   # same, on an Android TV (leanback) emulator
 andro clean --yes          # kill the emulator and delete ~/.andro
 ```
@@ -72,8 +73,10 @@ andro completions <shell>  # print a bash/zsh/fish completion script
 ```
 
 `<target>` for `run`/`install` is a single `.apk`, a **directory of split APKs**
-(installed with `install-multiple`), or a **`.xapk` / `.apks` / `.apkm` bundle**
-(unzipped, then installed). Apps install with permissions pre-granted (`adb -g`).
+(installed with `install-multiple`), a **`.xapk` / `.apks` / `.apkm` bundle**
+(unzipped, then installed), or an **`.aab`** (Android App Bundle — bundletool builds
+the splits matching the emulator, then they're installed). Apps install with
+permissions pre-granted (`adb -g`).
 
 ### Options (global)
 
@@ -165,12 +168,17 @@ APKs/bundles — runtime permissions pre-granted), detects the new package (diff
 `pm list packages`), resolves its launchable activity for the profile's category
 (`LAUNCHER` / `LEANBACK_LAUNCHER`) and starts it with `am start`.
 
+For an **`.aab`**, andro first fetches a self-contained **bundletool** jar into
+`~/.andro` (only on the first `.aab`), reads the booted emulator's device spec, and
+builds just the splits that device needs (`build-apks` → `extract-apks`), which then
+go through the same `install-multiple` path. The splits are debug-signed by bundletool
+— fine for a disposable emulator. Override the bundletool download with
+`ANDRO_BUNDLETOOL_URL`.
+
 Everything is contained in `~/.andro`, so cleanup is just removing that folder.
 
 ## Known limitations
 
-- **`.aab` (Android App Bundles)** can't be installed by `adb` — build an APK or
-  `.apks` with `bundletool` first, then `andro run` it.
 - **Apps requiring strong Play Integrity / SafetyNet** won't pass attestation on an
   emulator even with `--playstore`; that flag only helps apps that check for the
   Play Store's *presence* (real GMS), not hardware-attested integrity.

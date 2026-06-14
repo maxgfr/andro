@@ -65,6 +65,18 @@ pub fn ensure_jdk(sdk: &Sdk, arch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Download bundletool's jar on demand. Called lazily from the `.aab` install path
+/// (not from [`up`]) so users who never install a bundle don't pay the download.
+/// Idempotent: a present jar is a no-op.
+pub fn ensure_bundletool(sdk: &Sdk) -> Result<()> {
+    if sdk.bundletool_jar().exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(sdk.home())?;
+    eprintln!("⬇️  downloading bundletool…");
+    download(&sdk::bundletool_url(), &sdk.bundletool_jar())
+}
+
 pub fn ensure_sdk(sdk: &Sdk, image: &str) -> Result<()> {
     let image_dir = sdk.sdk_root().join(image.replace(';', "/"));
     if sdk.adb().exists() && sdk.emulator_bin().exists() && image_dir.exists() {
