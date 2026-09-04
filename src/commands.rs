@@ -553,8 +553,9 @@ pub fn stop(cfg: &Config) -> Result<()> {
 
 /// `andro clean` — kill the emulator and remove `~/.andro`.
 pub fn clean(cfg: &Config, yes: bool) -> Result<()> {
-    // Check existence BEFORE any adb call: `Sdk::command` creates the contained
-    // dirs, which would otherwise resurrect `~/.andro` and defeat this no-op.
+    // Check existence BEFORE any adb call, and keep `Sdk::command` from creating
+    // its contained dirs under a missing home (see `Sdk::command`) — together
+    // that is what makes "nothing left behind" hold for later commands too.
     if !cfg.home.exists() {
         println!("nothing to clean ({} does not exist)", cfg.home.display());
         return Ok(());

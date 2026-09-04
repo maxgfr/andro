@@ -76,13 +76,25 @@ fn autoclean_dry_run_on_missing_home_is_noop() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to clean"));
 }
 
+/// A read-only command on a missing home must exit 3 *and* leave the filesystem
+/// alone: `Sdk::command` used to `create_dir_all` unconditionally, so `status`
+/// or `stop` right after `clean` recreated `~/.andro/{avd,home,tmp}`.
 #[test]
 fn status_exits_3_when_not_running() {
+    let home = std::env::temp_dir().join("andro-status-none-xyz");
+    let _ = std::fs::remove_dir_all(&home);
     let out = Command::new(BIN)
-        .args(["--home", "/tmp/andro-status-none-xyz", "status"])
+        .args(["--home"])
+        .arg(&home)
+        .arg("status")
         .output()
         .expect("run andro");
     assert_eq!(out.status.code(), Some(3));
+    assert!(
+        !home.exists(),
+        "status must not recreate {}",
+        home.display()
+    );
 }
 
 /// `wait --timeout N` must give up after N seconds. It used to call

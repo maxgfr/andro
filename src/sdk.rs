@@ -169,11 +169,17 @@ impl Sdk {
     /// the bundled adb honours for its key dir), the emulator's `.android` home
     /// is redirected, a dedicated adb port isolates our server, and temp dirs are
     /// contained. The dirs are created here so the first adb/emulator call can't
-    /// fail trying to `mkdir` a missing `.android` parent.
+    /// fail trying to `mkdir` a missing `.android` parent — but only once the home
+    /// itself exists, so a read-only command after `clean` (`status`, `stop`)
+    /// cannot resurrect the tree we just promised to leave nothing behind. A
+    /// missing home has no binaries to run anyway; provisioning creates it in
+    /// `ensure_jdk` before the first tool call.
     pub fn command(&self, program: &Path) -> Command {
-        let _ = std::fs::create_dir_all(self.android_home());
-        let _ = std::fs::create_dir_all(self.tmp_dir());
-        let _ = std::fs::create_dir_all(self.avd_home());
+        if self.home.is_dir() {
+            let _ = std::fs::create_dir_all(self.android_home());
+            let _ = std::fs::create_dir_all(self.tmp_dir());
+            let _ = std::fs::create_dir_all(self.avd_home());
+        }
         let mut c = Command::new(program);
         let path = format!(
             "{}:{}:{}",
