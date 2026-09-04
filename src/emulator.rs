@@ -121,6 +121,51 @@ pub fn parse_image_sysdir(config_ini: &str) -> Option<String> {
         .map(|v| v.trim().trim_end_matches('/').to_string())
 }
 
+/// Read a `key=value` out of a `config.ini`, trimmed. `None` when absent.
+pub fn config_value(config_ini: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    config_ini
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(&prefix))
+        .map(|v| v.trim().to_string())
+}
+
+/// True when an existing AVD's `config.ini` still matches the requested system
+/// image and device profile.
+///
+/// `expected_sysdir` is the image in path form (`system-images/android-36/...`,
+/// i.e. `Config::image()` with `;` replaced by `/`) and `expected_device` the
+/// avdmanager device name. A `config.ini` missing either key counts as a
+/// mismatch: we cannot prove it matches, and an AVD is disposable by design.
+pub fn avd_matches(config_ini: &str, expected_sysdir: &str, expected_device: &str) -> bool {
+    let sysdir = parse_image_sysdir(config_ini);
+    let device = config_value(config_ini, "hw.device.name");
+    match (sysdir, device) {
+        (Some(s), Some(d)) => s == expected_sysdir.trim_end_matches('/') && d == expected_device,
+        _ => false,
+    }
+}
+
+/// What an existing AVD is, in the same shape [`avd_label`] renders a request:
+/// `android-34/google_apis/arm64-v8a on pixel`. Lets a recreate or refusal
+/// message name exactly what changed — API level, image tag or device.
+pub fn avd_label_from_config(config_ini: &str) -> String {
+    let image = parse_image_sysdir(config_ini).unwrap_or_else(|| "unknown".to_string());
+    let device = config_value(config_ini, "hw.device.name").unwrap_or_else(|| "unknown".into());
+    avd_label(&image, &device)
+}
+
+/// The same label for a *requested* configuration. `sysdir` is the image in path
+/// form (`Config::image()` with `;` replaced by `/`); the `system-images/` prefix
+/// is dropped so both sides read as `android-36/google_apis/arm64-v8a on pixel`.
+pub fn avd_label(sysdir: &str, device: &str) -> String {
+    let image = sysdir
+        .trim_end_matches('/')
+        .strip_prefix("system-images/")
+        .unwrap_or(sysdir.trim_end_matches('/'));
+    format!("{image} on {device}")
+}
+
 /// Ensure an AVD `config.ini` enables the emulated hardware keyboard so the host
 /// (Mac) keyboard types into the guest. avdmanager's device profiles default
 /// `hw.keyboard=no`, which silently drops host key events — you tap a field, the
@@ -228,6 +273,84 @@ mod tests {
     fn parse_image_sysdir_none_when_absent() {
         assert_eq!(parse_image_sysdir("hw.ramSize=2048\n"), None);
         assert_eq!(parse_image_sysdir(""), None);
+    }
+
+    const AVD_INI: &str = "avd.ini.displayname=andro\n\
+                           abi.type=arm64-v8a\n\
+                           hw.device.name=pixel\n\
+                           image.sysdir.1=system-images/android-36/google_apis/arm64-v8a/\n\
+                           tag.id=google_apis\n";
+
+    #[test]
+    fn avd_matches_when_image_and_device_agree() {
+        assert!(avd_matches(
+            AVD_INI,
+            "system-images/android-36/google_apis/arm64-v8a",
+            "pixel"
+        ));
+    }
+
+    #[test]
+    fn avd_matches_false_on_different_api_or_device() {
+        // a different API level (the common `--api 34` -> `--api 36` case)
+        assert!(!avd_matches(
+            AVD_INI,
+            "system-images/android-34/google_apis/arm64-v8a",
+            "pixel"
+        ));
+        // a different device profile
+        assert!(!avd_matches(
+            AVD_INI,
+            "system-images/android-36/google_apis/arm64-v8a",
+            "pixel_7"
+        ));
+        // a different tag (phone -> playstore image)
+        assert!(!avd_matches(
+            AVD_INI,
+            "system-images/android-36/google_apis_playstore/arm64-v8a",
+            "pixel"
+        ));
+    }
+
+    #[test]
+    fn avd_matches_false_when_keys_are_missing() {
+        assert!(!avd_matches(
+            "hw.ramSize=2048\n",
+            "system-images/x",
+            "pixel"
+        ));
+        assert!(!avd_matches(
+            "image.sysdir.1=system-images/x\n",
+            "system-images/x",
+            "pixel"
+        ));
+        assert!(!avd_matches(
+            "hw.device.name=pixel\n",
+            "system-images/x",
+            "pixel"
+        ));
+        assert!(!avd_matches("", "system-images/x", "pixel"));
+    }
+
+    #[test]
+    fn avd_label_names_image_and_device_on_both_sides() {
+        assert_eq!(
+            avd_label_from_config(AVD_INI),
+            "android-36/google_apis/arm64-v8a on pixel"
+        );
+        // a requested config renders identically, so a message reads as a diff
+        assert_eq!(
+            avd_label("system-images/android-34/google_apis/arm64-v8a", "pixel"),
+            "android-34/google_apis/arm64-v8a on pixel"
+        );
+    }
+
+    #[test]
+    fn avd_label_from_config_says_unknown_when_unreadable() {
+        assert_eq!(
+            avd_label_from_config("hw.ramSize=2048\n"),
+            "unknown on unknown"
+        );
     }
 
     #[test]

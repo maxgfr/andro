@@ -130,13 +130,55 @@ fn accept_licenses(sdk: &Sdk) {
     }
 }
 
+/// Create the AVD if missing, or recreate it when `--api`/`--device`/the image
+/// tag no longer match what it was created with.
+///
+/// Existence alone used to be the whole check, so changing `--api` silently did
+/// nothing: `andro --api 36 run app.apk` kept booting the android-34 AVD created
+/// by an earlier run. An AVD is disposable by design (the SDK image it points at
+/// is not re-downloaded), so recreating it is the right answer — only a
+/// `--snapshot` quickboot state is lost, which the message says out loud.
 pub fn ensure_avd(sdk: &Sdk, cfg: &Config) -> Result<()> {
-    let avd_ini = sdk
-        .avd_home()
-        .join(format!("{}.ini", cfg.profile.avd_name()));
+    let name = cfg.profile.avd_name();
+    let avd_ini = sdk.avd_home().join(format!("{name}.ini"));
     if avd_ini.exists() {
-        return Ok(());
+        let config_ini = sdk
+            .avd_home()
+            .join(format!("{name}.avd"))
+            .join("config.ini");
+        let text = fs::read_to_string(&config_ini).unwrap_or_default();
+        let want_sysdir = cfg.image().replace(';', "/");
+        if emulator::avd_matches(&text, &want_sysdir, &cfg.device) {
+            return Ok(());
+        }
+        let had = emulator::avd_label_from_config(&text);
+        let want = emulator::avd_label(&want_sysdir, &cfg.device);
+        if is_running(sdk) {
+            bail!(
+                "AVD '{name}' is {had} but {want} was requested — \
+                 run `andro stop` first so it can be recreated"
+            );
+        }
+        eprintln!("♻️  recreating AVD '{name}' ({had} → {want})…");
+        delete_avd(sdk, name)?;
     }
+    create_avd(sdk, cfg)
+}
+
+/// `avdmanager delete avd -n <name>`. Also sweeps the `.avd` dir and `.ini` in
+/// case avdmanager left residue, so the following create starts from nothing.
+fn delete_avd(sdk: &Sdk, name: &str) -> Result<()> {
+    let mut c = sdk.command(&sdk.avdmanager());
+    c.args(["delete", "avd", "-n", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = run_checked(c, "avdmanager delete avd");
+    let _ = fs::remove_dir_all(sdk.avd_home().join(format!("{name}.avd")));
+    let _ = fs::remove_file(sdk.avd_home().join(format!("{name}.ini")));
+    Ok(())
+}
+
+fn create_avd(sdk: &Sdk, cfg: &Config) -> Result<()> {
     fs::create_dir_all(sdk.avd_home())?;
     eprintln!("🛠  creating AVD '{}'…", cfg.profile.avd_name());
     let mut child = sdk
