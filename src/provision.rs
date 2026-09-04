@@ -5,7 +5,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -190,6 +190,7 @@ pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
     if is_booted(sdk) {
         return Ok(());
     }
+    let mut child: Option<Child> = None;
     if !is_running(sdk) {
         clear_stale_locks(sdk, cfg);
         enable_hw_keyboard(sdk, cfg);
@@ -202,9 +203,11 @@ pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
         {
             c.stdout(Stdio::from(f)).stderr(Stdio::from(f2));
         }
-        c.spawn().context("failed to launch emulator")?; // detached
+        // Detached, but keep the handle: watching it lets us fail fast (with the
+        // emulator log) instead of polling a dead process until BOOT_TIMEOUT.
+        child = Some(c.spawn().context("failed to launch emulator")?);
     }
-    wait_for_boot(sdk)
+    wait_ready_with(sdk, BOOT_TIMEOUT, false, child.as_mut())
 }
 
 /// Emulator launch flags. Cold boot by default (`-no-snapshot`) to keep a clean
@@ -265,16 +268,26 @@ fn clear_stale_locks(sdk: &Sdk, cfg: &Config) {
     }
 }
 
-fn wait_for_boot(sdk: &Sdk) -> Result<()> {
-    wait_ready(sdk, BOOT_TIMEOUT, false)
+/// Block until the emulator is ready: `sys.boot_completed` → (unless `boot_only`)
+/// PackageManager answers. Errors on timeout. Does NOT boot — waits on whatever
+/// is currently running. Exposed for `andro wait`.
+pub fn wait_ready(sdk: &Sdk, timeout: Duration, boot_only: bool) -> Result<()> {
+    wait_ready_with(sdk, timeout, boot_only, None)
 }
 
-/// Block until the emulator is ready: device attached → `sys.boot_completed` →
-/// (unless `boot_only`) PackageManager answers. Errors on timeout. Does NOT
-/// boot — waits on whatever is currently running. Exposed for `andro wait`.
-pub fn wait_ready(sdk: &Sdk, timeout: Duration, boot_only: bool) -> Result<()> {
+/// The polling loop behind [`wait_ready`], optionally watching the emulator
+/// process we just spawned.
+///
+/// No `adb wait-for-device` here: that call blocks forever when nothing is
+/// attached, which silently swallowed the timeout. `adb shell getprop` fails
+/// immediately without a device, so plain polling honours the deadline.
+fn wait_ready_with(
+    sdk: &Sdk,
+    timeout: Duration,
+    boot_only: bool,
+    mut child: Option<&mut Child>,
+) -> Result<()> {
     let start = Instant::now();
-    let _ = sdk.adb_try(&["wait-for-device"]);
     loop {
         if is_booted(sdk) {
             eprintln!("✅ emulator booted");
@@ -283,6 +296,22 @@ pub fn wait_ready(sdk: &Sdk, timeout: Duration, boot_only: bool) -> Result<()> {
             }
             return Ok(());
         }
+        // A crashed emulator (bad AVD, missing image, KVM/HVF trouble) would
+        // otherwise keep us polling for the full timeout. Only a non-zero exit
+        // is fatal: a launcher that hands off and exits 0 stays a normal boot.
+        if let Some(c) = child.as_deref_mut()
+            && let Ok(Some(status)) = c.try_wait()
+        {
+            if !status.success() {
+                bail!(
+                    "emulator exited early (status {:?}) — last lines of {}:\n{}",
+                    status.code(),
+                    sdk.home().join("emulator.log").display(),
+                    emulator_log_tail(sdk)
+                );
+            }
+            child = None;
+        }
         if start.elapsed() > timeout {
             bail!(
                 "emulator did not become ready within {}s",
@@ -290,6 +319,23 @@ pub fn wait_ready(sdk: &Sdk, timeout: Duration, boot_only: bool) -> Result<()> {
             );
         }
         sleep(POLL);
+    }
+}
+
+/// Last few lines of `~/.andro/emulator.log`, for a crash message that says why.
+fn emulator_log_tail(sdk: &Sdk) -> String {
+    const LINES: usize = 20;
+    match fs::read_to_string(sdk.home().join("emulator.log")) {
+        Ok(text) => {
+            let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = &all[all.len().saturating_sub(LINES)..];
+            if tail.is_empty() {
+                "(log is empty)".to_string()
+            } else {
+                tail.join("\n")
+            }
+        }
+        Err(_) => "(no emulator log)".to_string(),
     }
 }
 

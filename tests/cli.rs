@@ -85,6 +85,34 @@ fn status_exits_3_when_not_running() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+/// `wait --timeout N` must give up after N seconds. It used to call
+/// `adb wait-for-device`, which blocks forever when no device is attached, so
+/// the timeout never fired and `up` hung on a crashed emulator.
+#[test]
+fn wait_times_out_when_nothing_runs() {
+    let home = std::env::temp_dir().join("andro-wait-timeout-xyz");
+    let _ = std::fs::remove_dir_all(&home);
+    let start = std::time::Instant::now();
+    let out = Command::new(BIN)
+        .args(["--home"])
+        .arg(&home)
+        .args(["wait", "--timeout", "1"])
+        .output()
+        .expect("run andro");
+    let elapsed = start.elapsed();
+    assert!(!out.status.success(), "wait should fail with no emulator");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("did not become ready"),
+        "expected a timeout message; got:\n{stderr}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "wait --timeout 1 took {elapsed:?} — the timeout is not honoured"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn config_file_drives_defaults() {
     let home = "/tmp/andro-cfg-test-xyz";
