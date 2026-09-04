@@ -564,15 +564,53 @@ pub fn status(cfg: &Config, json: bool) -> Result<()> {
 }
 
 /// `andro stop` — stop the emulator, keep `~/.andro`.
+///
+/// `adb emu kill` is fire-and-forget and does not always take: a kill sent while
+/// the emulator is still early in its boot is acknowledged and ignored, and the
+/// old code announced "emulator stopped" either way, leaving a live emulator
+/// behind an exit code of 0. Confirm the device really goes away, ask a second
+/// time if it hasn't, and fail loudly rather than lie.
 pub fn stop(cfg: &Config) -> Result<()> {
     let s = sdk(cfg);
-    if provision::is_running(&s) {
-        let _ = s.adb_try(&["emu", "kill"]);
-        println!("⏹  emulator stopped");
-    } else {
+    if !provision::is_running(&s) {
         println!("emulator not running");
+        return Ok(());
     }
+    kill_emulator(&s)?;
+    println!("⏹  emulator stopped");
     Ok(())
+}
+
+/// How long a single `emu kill` gets to actually detach the device.
+const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Kill the running emulator and wait for it to actually detach, asking a second
+/// time if the first request was ignored. Errors if it is still there after that.
+fn kill_emulator(s: &Sdk) -> Result<()> {
+    for attempt in 0..2 {
+        let _ = s.adb_try(&["emu", "kill"]);
+        if wait_until_gone(s, STOP_TIMEOUT) {
+            return Ok(());
+        }
+        if attempt == 0 {
+            eprintln!("… emulator still attached, asking again");
+        }
+    }
+    bail!("emulator did not stop — run `andro status`, then try again");
+}
+
+/// Poll until no emulator is attached any more. True if it went away in time.
+fn wait_until_gone(s: &Sdk, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if !provision::is_running(s) {
+            return true;
+        }
+        if start.elapsed() > timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// `andro clean` — kill the emulator and remove `~/.andro`.
@@ -593,7 +631,11 @@ pub fn clean(cfg: &Config, yes: bool) -> Result<()> {
     }
     let s = sdk(cfg);
     // These target andro's dedicated adb port, not the user's global 5037 server.
-    let _ = s.adb_try(&["emu", "kill"]);
+    // Confirm the emulator is really gone before deleting the tree: unlinking it
+    // under a live emulator leaves a process running with no adb left to kill it.
+    if provision::is_running(&s) {
+        kill_emulator(&s)?;
+    }
     let _ = s.adb_try(&["kill-server"]);
     fs::remove_dir_all(&cfg.home)
         .with_context(|| format!("failed to remove {}", cfg.home.display()))?;
