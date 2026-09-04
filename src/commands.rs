@@ -56,6 +56,10 @@ pub fn run(
     let pkg = emulator::newly_installed(&before, &after)
         .into_iter()
         .next()
+        // Reinstalling an app the device already has adds nothing to the package
+        // list, so fall back to whichever third-party package was just written
+        // rather than to an arbitrary one.
+        .or_else(|| just_updated_package(&s, &after))
         .or_else(|| after.last().cloned())
         .context("could not determine the installed package")?;
     println!("✅ installed {pkg}");
@@ -69,6 +73,13 @@ pub fn run(
         clean(cfg, true)?;
     }
     Ok(())
+}
+
+/// The third-party package with the freshest `lastUpdateTime`, i.e. the one the
+/// install just refreshed. Best-effort: `None` if dumpsys can't be read.
+fn just_updated_package(s: &Sdk, candidates: &[String]) -> Option<String> {
+    let out = s.adb_try(&["shell", "dumpsys", "package", "packages"])?;
+    emulator::most_recently_updated(&out, candidates)
 }
 
 /// Install whatever `target` is — single apk, split-apk directory, bundle zip, or

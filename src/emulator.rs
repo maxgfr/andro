@@ -166,6 +166,34 @@ pub fn avd_label(sysdir: &str, device: &str) -> String {
     format!("{image} on {device}")
 }
 
+/// The candidate package with the most recent `lastUpdateTime` in
+/// `adb shell dumpsys package packages` output.
+///
+/// Reinstalling an app the emulator already has adds nothing to `pm list
+/// packages`, so the install/launch path has no new package to point at. This
+/// finds the one that was just written instead of guessing. `candidates` is the
+/// third-party package list; anything outside it is ignored. `lastUpdateTime`
+/// is `YYYY-MM-DD HH:MM:SS`, which compares correctly as a string.
+pub fn most_recently_updated(dumpsys_packages: &str, candidates: &[String]) -> Option<String> {
+    let mut current: Option<&str> = None;
+    let mut best: Option<(String, String)> = None;
+    for line in dumpsys_packages.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Package [") {
+            current = rest.split(']').next();
+        } else if let Some(value) = line.strip_prefix("lastUpdateTime=")
+            && let Some(pkg) = current
+            && candidates.iter().any(|c| c == pkg)
+        {
+            let when = value.trim().to_string();
+            if best.as_ref().is_none_or(|(best_when, _)| when > *best_when) {
+                best = Some((when, pkg.to_string()));
+            }
+        }
+    }
+    best.map(|(_, pkg)| pkg)
+}
+
 /// Parse `adb emu avd name`, whose reply is the AVD name followed by adb's
 /// trailing `OK`. `None` when nothing is attached (`error: no emulator
 /// detected`) or the console answered anything but a name.
@@ -348,6 +376,51 @@ mod tests {
             "pixel"
         ));
         assert!(!avd_matches("", "system-images/x", "pixel"));
+    }
+
+    const DUMPSYS: &str = "\
+Packages:
+  Package [com.android.settings] (a1b2c3):
+    userId=1000
+    firstInstallTime=2026-01-01 09:00:00
+    lastUpdateTime=2026-09-04 18:00:00
+  Package [com.old.app] (d4e5f6):
+    userId=10201
+    firstInstallTime=2026-02-02 10:00:00
+    lastUpdateTime=2026-02-02 10:00:00
+  Package [com.fresh.app] (7a8b9c):
+    userId=10202
+    firstInstallTime=2026-03-03 11:00:00
+    lastUpdateTime=2026-09-04 17:59:12
+";
+
+    #[test]
+    fn most_recently_updated_picks_the_latest_candidate() {
+        let candidates = vec!["com.old.app".to_string(), "com.fresh.app".to_string()];
+        assert_eq!(
+            most_recently_updated(DUMPSYS, &candidates),
+            Some("com.fresh.app".to_string())
+        );
+    }
+
+    #[test]
+    fn most_recently_updated_ignores_packages_outside_candidates() {
+        // com.android.settings has the newest timestamp but is not third-party.
+        let candidates = vec!["com.old.app".to_string()];
+        assert_eq!(
+            most_recently_updated(DUMPSYS, &candidates),
+            Some("com.old.app".to_string())
+        );
+    }
+
+    #[test]
+    fn most_recently_updated_none_without_a_match() {
+        assert_eq!(most_recently_updated("", &["com.a".to_string()]), None);
+        assert_eq!(most_recently_updated(DUMPSYS, &[]), None);
+        assert_eq!(
+            most_recently_updated(DUMPSYS, &["com.absent.app".to_string()]),
+            None
+        );
     }
 
     #[test]
