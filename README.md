@@ -159,7 +159,9 @@ On first `run`/`up`, `andro` provisions `~/.andro` end to end:
 2. downloads the Android **command-line tools**, then installs `platform-tools`,
    `emulator` and the chosen **system image** (`google_apis` for phone,
    `android-tv` for `--tv`),
-3. creates an AVD (`andro` or `andro-tv`),
+3. creates an AVD (`andro` or `andro-tv`) — and recreates it when `--api` or
+   `--device` no longer match the one on disk (an AVD is disposable; only a
+   `--snapshot` quickboot state is lost),
 4. boots the emulator (HVF), waits for `sys.boot_completed`, then waits until
    PackageManager actually answers (so the first install can't race the boot).
 
@@ -174,6 +176,11 @@ builds just the splits that device needs (`build-apks` → `extract-apks`), whic
 go through the same `install-multiple` path. The splits are debug-signed by bundletool
 — fine for a disposable emulator. Override the bundletool download with
 `ANDRO_BUNDLETOOL_URL`.
+
+andro drives one emulator at a time: if the *other* profile's AVD is up (say
+`andro-tv` while you ask for a phone), `run`/`up` stop with an error instead of
+installing on the wrong device — run `andro stop` first. `andro status` names
+the running AVD (`running_avd` in `--json`).
 
 Everything is contained in `~/.andro`, so cleanup is just removing that folder.
 
