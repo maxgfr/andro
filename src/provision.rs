@@ -38,6 +38,7 @@ fn download(url: &str, dest: &Path) -> Result<()> {
 
 /// Run the whole chain: JDK → SDK → AVD → boot.
 pub fn up(sdk: &Sdk, cfg: &Config) -> Result<()> {
+    check_running_profile(sdk, cfg)?;
     ensure_jdk(sdk, std::env::consts::ARCH)?;
     ensure_sdk(sdk, &cfg.image())?;
     ensure_avd(sdk, cfg)?;
@@ -228,7 +229,36 @@ pub fn is_booted(sdk: &Sdk) -> bool {
         .unwrap_or(false)
 }
 
+/// Name of the AVD currently attached to andro's adb server, if any.
+/// Asks the emulator console directly (`adb emu avd name`).
+pub fn running_avd_name(sdk: &Sdk) -> Option<String> {
+    sdk.adb_try(&["emu", "avd", "name"])
+        .as_deref()
+        .and_then(emulator::parse_avd_name)
+}
+
+/// Refuse to drive an emulator that belongs to the other profile.
+///
+/// `boot` short-circuits on `is_booted`, which only asks "is *something*
+/// booted?". With `andro-tv` up, a plain `andro run app.apk` would happily
+/// install and launch the phone app on the TV emulator. andro runs one emulator
+/// at a time, so the honest answer is to stop first.
+fn check_running_profile(sdk: &Sdk, cfg: &Config) -> Result<()> {
+    let want = cfg.profile.avd_name();
+    if let Some(running) = running_avd_name(sdk)
+        && running != want
+    {
+        bail!(
+            "emulator '{running}' is running but profile {:?} (AVD '{want}') was requested — \
+             run `andro stop` first",
+            cfg.profile
+        );
+    }
+    Ok(())
+}
+
 pub fn boot(sdk: &Sdk, cfg: &Config) -> Result<()> {
+    check_running_profile(sdk, cfg)?;
     if is_booted(sdk) {
         return Ok(());
     }

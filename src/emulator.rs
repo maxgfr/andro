@@ -166,6 +166,24 @@ pub fn avd_label(sysdir: &str, device: &str) -> String {
     format!("{image} on {device}")
 }
 
+/// Parse `adb emu avd name`, whose reply is the AVD name followed by adb's
+/// trailing `OK`. `None` when nothing is attached (`error: no emulator
+/// detected`) or the console answered anything but a name.
+pub fn parse_avd_name(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .filter(|l| {
+            *l != "OK"
+                && *l != "KO"
+                && !l.starts_with("error")
+                && !l.starts_with("KO:")
+                && !l.contains(':')
+        })
+        .map(str::to_string)
+}
+
 /// Ensure an AVD `config.ini` enables the emulated hardware keyboard so the host
 /// (Mac) keyboard types into the guest. avdmanager's device profiles default
 /// `hw.keyboard=no`, which silently drops host key events — you tap a field, the
@@ -330,6 +348,24 @@ mod tests {
             "pixel"
         ));
         assert!(!avd_matches("", "system-images/x", "pixel"));
+    }
+
+    #[test]
+    fn parse_avd_name_reads_the_console_reply() {
+        assert_eq!(
+            parse_avd_name("andro-tv\r\nOK\r\n"),
+            Some("andro-tv".to_string())
+        );
+        assert_eq!(parse_avd_name("andro\nOK\n"), Some("andro".to_string()));
+        assert_eq!(parse_avd_name("\n\nandro\nOK\n"), Some("andro".to_string()));
+    }
+
+    #[test]
+    fn parse_avd_name_none_when_no_emulator() {
+        assert_eq!(parse_avd_name("error: no emulator detected"), None);
+        assert_eq!(parse_avd_name("KO: unknown command\r\n"), None);
+        assert_eq!(parse_avd_name("OK\r\n"), None);
+        assert_eq!(parse_avd_name(""), None);
     }
 
     #[test]

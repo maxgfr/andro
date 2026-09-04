@@ -515,16 +515,29 @@ pub fn status(cfg: &Config, json: bool) -> Result<()> {
     let s = sdk(cfg);
     let running = provision::is_running(&s);
     let booted = running && provision::is_booted(&s);
+    // Which AVD is actually up — not necessarily the one this profile asks for.
+    let running_avd = if running {
+        provision::running_avd_name(&s)
+    } else {
+        None
+    };
     if json {
+        let running_avd_json = running_avd
+            .as_deref()
+            .map(|n| format!("\"{n}\""))
+            .unwrap_or_else(|| "null".to_string());
         println!(
-            "{{\"running\":{running},\"booted\":{booted},\"avd\":\"{}\",\"profile\":\"{:?}\",\"api\":{},\"adb_port\":{}}}",
+            "{{\"running\":{running},\"booted\":{booted},\"avd\":\"{}\",\"running_avd\":{running_avd_json},\"profile\":\"{:?}\",\"api\":{},\"adb_port\":{}}}",
             cfg.profile.avd_name(),
             cfg.profile,
             cfg.api,
             crate::sdk::ADB_SERVER_PORT
         );
     } else if running {
-        println!("emulator: running (booted={booted})");
+        match running_avd.as_deref() {
+            Some(avd) => println!("emulator: running (avd={avd}, booted={booted})"),
+            None => println!("emulator: running (booted={booted})"),
+        }
     } else {
         println!("emulator: not running");
     }
